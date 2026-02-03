@@ -2,5 +2,5 @@
   "name": "Custom Energy Sources Card",
   "render_readme": true,
   "filename": "custom-energy-sources-card.js",
-  "content_in_root": false
+  "content_in_root": true
 }

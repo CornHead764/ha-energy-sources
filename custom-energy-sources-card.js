@@ -1,10 +1,10 @@
 /**
  * Custom Energy Sources Card
  * A HACS-compatible custom Lovelace card for Home Assistant
- * Version 1.1.0
+ * Version 1.2.1
  */
 
-const CARD_VERSION = '1.2.0';
+const CARD_VERSION = '1.2.1';
 
 const DEFAULT_EMOJIS = {
   solar: '☀️',
@@ -562,8 +562,20 @@ class CustomEnergySourcesCardEditor extends HTMLElement {
   }
 
   _fireConfigChanged() {
+    // Create a clean config without internal properties
+    const cleanConfig = {
+      ...this._config,
+      sources: (this._config.sources || []).map(source => {
+        const clean = { ...source };
+        // Remove internal tracking properties
+        delete clean._labelCustomized;
+        delete clean._emojiCustomized;
+        return clean;
+      })
+    };
+
     const event = new CustomEvent('config-changed', {
-      detail: { config: { ...this._config } },
+      detail: { config: cleanConfig },
       bubbles: true,
       composed: true
     });
@@ -572,9 +584,23 @@ class CustomEnergySourcesCardEditor extends HTMLElement {
 
   _updateEntityPickers() {
     if (!this._hass) return;
-    const pickers = this.shadowRoot.querySelectorAll('ha-entity-picker');
-    pickers.forEach(picker => {
+    const sources = this._config.sources || [];
+
+    // Update all entity pickers with hass and their values
+    this.shadowRoot.querySelectorAll('.source-entity').forEach(picker => {
       picker.hass = this._hass;
+      const index = parseInt(picker.dataset.index);
+      if (sources[index]) {
+        picker.value = sources[index].entity || '';
+      }
+    });
+
+    this.shadowRoot.querySelectorAll('.source-rate-entity').forEach(picker => {
+      picker.hass = this._hass;
+      const index = parseInt(picker.dataset.index);
+      if (sources[index]) {
+        picker.value = sources[index].rate_entity || '';
+      }
     });
   }
 
@@ -724,7 +750,10 @@ class CustomEnergySourcesCardEditor extends HTMLElement {
 
     this._rendered = true;
     this._attachEventListeners();
-    this._updateEntityPickers();
+    // Delay entity picker update to ensure elements are in DOM
+    requestAnimationFrame(() => {
+      this._updateEntityPickers();
+    });
   }
 
   _renderSourceCard(source, index) {
@@ -765,7 +794,6 @@ class CustomEnergySourcesCardEditor extends HTMLElement {
           <ha-entity-picker
             class="source-entity"
             data-index="${index}"
-            .value="${source.entity || ''}"
             allow-custom-entity
           ></ha-entity-picker>
         </div>
@@ -781,7 +809,6 @@ class CustomEnergySourcesCardEditor extends HTMLElement {
             <ha-entity-picker
               class="source-rate-entity"
               data-index="${index}"
-              .value="${source.rate_entity || ''}"
               allow-custom-entity
             ></ha-entity-picker>
           </div>

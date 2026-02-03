@@ -1,10 +1,10 @@
 /**
  * Custom Energy Sources Card
  * A HACS-compatible custom Lovelace card for Home Assistant
- * Version 1.1.0
+ * Version 1.2.1
  */
 
-const CARD_VERSION = '1.1.0';
+const CARD_VERSION = '1.2.1';
 
 const DEFAULT_EMOJIS = {
   solar: '☀️',
@@ -267,11 +267,37 @@ class CustomEnergySourcesCard extends HTMLElement {
   _calculateCost(source, value) {
     if (!source.show_cost) return null;
 
-    let rate = 0;
-    if (source.rate_entity && this._hass?.states?.[source.rate_entity]) {
-      rate = parseFloat(this._hass.states[source.rate_entity].state) || 0;
-    } else if (typeof source.rate_static === 'number') {
+    let rate = null;
+    let rateSource = 'none';
+
+    // Try to get rate from entity first
+    if (source.rate_entity) {
+      const entityState = this._hass?.states?.[source.rate_entity];
+      if (entityState) {
+        const parsedRate = parseFloat(entityState.state);
+        if (!isNaN(parsedRate)) {
+          rate = parsedRate;
+          rateSource = 'entity';
+        } else {
+          console.debug(`[Energy Card] Rate entity "${source.rate_entity}" has non-numeric state: "${entityState.state}"`);
+        }
+      } else {
+        console.debug(`[Energy Card] Rate entity "${source.rate_entity}" not found in Home Assistant states`);
+      }
+    }
+
+    // Fall back to static rate
+    if (rate === null && typeof source.rate_static === 'number') {
       rate = source.rate_static;
+      rateSource = 'static';
+    }
+
+    // If still no rate, default to 0 but log it
+    if (rate === null) {
+      if (source.rate_entity || source.rate_static !== null) {
+        console.debug(`[Energy Card] No valid rate found for "${source.label}", using 0`);
+      }
+      rate = 0;
     }
 
     if (source.cost_formula) {
@@ -282,6 +308,7 @@ class CustomEnergySourcesCard extends HTMLElement {
         const result = new Function('return ' + formula)();
         return source.invert_cost ? -result : result;
       } catch (e) {
+        console.error(`[Energy Card] Cost formula error for "${source.label}":`, e);
         return null;
       }
     }
@@ -299,7 +326,11 @@ class CustomEnergySourcesCard extends HTMLElement {
   }
 
   _formatCost(cost, decimals = 2) {
-    if (cost === null || typeof cost !== 'number' || isNaN(cost)) return '';
+    if (cost === null) return '';
+    if (typeof cost !== 'number' || isNaN(cost)) {
+      console.debug('[Energy Card] Invalid cost value:', cost);
+      return '';
+    }
     const currency = this._config?.currency || '$';
     const absValue = Math.abs(cost);
     const formatted = absValue.toLocaleString(undefined, {
@@ -329,6 +360,17 @@ class CustomEnergySourcesCard extends HTMLElement {
         hasAnyCost = true;
       }
 
+      // Check if rate entity is configured but not working
+      let rateWarning = null;
+      if (source.show_cost && source.rate_entity) {
+        const entityState = this._hass?.states?.[source.rate_entity];
+        if (!entityState) {
+          rateWarning = 'Entity not found';
+        } else if (isNaN(parseFloat(entityState.state))) {
+          rateWarning = `Invalid: ${entityState.state}`;
+        }
+      }
+
       return {
         emoji: source.emoji || '📊',
         label: source.label || 'Energy',
@@ -336,6 +378,7 @@ class CustomEnergySourcesCard extends HTMLElement {
         unit: source.unit || 'kWh',
         cost: cost,
         costFormatted: this._formatCost(cost, this._config.cost_decimal_places),
+        rateWarning: rateWarning,
         isNegative: value < 0,
         isCostCredit: cost !== null && cost < 0
       };
@@ -414,6 +457,7 @@ class CustomEnergySourcesCard extends HTMLElement {
         .value.credit { color: var(--success-color, #43a047); }
         .cost { font-size: 0.85em; color: var(--secondary-text-color); }
         .cost.credit { color: var(--success-color, #43a047); }
+        .cost.warning { color: var(--warning-color, #ff9800); font-size: 0.75em; }
         .unit { font-size: 0.85em; color: var(--secondary-text-color); margin-left: 4px; }
         .no-data { text-align: center; color: var(--secondary-text-color); padding: 20px; }
         .net-metering-row {
@@ -439,7 +483,8 @@ class CustomEnergySourcesCard extends HTMLElement {
                 </div>
                 <div class="values">
                   <span class="value ${row.isNegative ? 'negative' : ''}">${row.value}<span class="unit">${row.unit}</span></span>
-                  ${row.costFormatted ? `<span class="cost ${row.isCostCredit ? 'credit' : ''}">${row.costFormatted}</span>` : ''}
+                  ${row.rateWarning ? `<span class="cost warning" title="${row.rateWarning}">⚠️ ${row.rateWarning}</span>` :
+                    (row.costFormatted ? `<span class="cost ${row.isCostCredit ? 'credit' : ''}">${row.costFormatted}</span>` : '')}
                 </div>
               </div>
             `).join('')}
@@ -517,8 +562,20 @@ class CustomEnergySourcesCardEditor extends HTMLElement {
   }
 
   _fireConfigChanged() {
+    // Create a clean config without internal properties
+    const cleanConfig = {
+      ...this._config,
+      sources: (this._config.sources || []).map(source => {
+        const clean = { ...source };
+        // Remove internal tracking properties
+        delete clean._labelCustomized;
+        delete clean._emojiCustomized;
+        return clean;
+      })
+    };
+
     const event = new CustomEvent('config-changed', {
-      detail: { config: { ...this._config } },
+      detail: { config: cleanConfig },
       bubbles: true,
       composed: true
     });
@@ -527,9 +584,23 @@ class CustomEnergySourcesCardEditor extends HTMLElement {
 
   _updateEntityPickers() {
     if (!this._hass) return;
-    const pickers = this.shadowRoot.querySelectorAll('ha-entity-picker');
-    pickers.forEach(picker => {
+    const sources = this._config.sources || [];
+
+    // Update all entity pickers with hass and their values
+    this.shadowRoot.querySelectorAll('.source-entity').forEach(picker => {
       picker.hass = this._hass;
+      const index = parseInt(picker.dataset.index);
+      if (sources[index]) {
+        picker.value = sources[index].entity || '';
+      }
+    });
+
+    this.shadowRoot.querySelectorAll('.source-rate-entity').forEach(picker => {
+      picker.hass = this._hass;
+      const index = parseInt(picker.dataset.index);
+      if (sources[index]) {
+        picker.value = sources[index].rate_entity || '';
+      }
     });
   }
 
@@ -679,7 +750,10 @@ class CustomEnergySourcesCardEditor extends HTMLElement {
 
     this._rendered = true;
     this._attachEventListeners();
-    this._updateEntityPickers();
+    // Delay entity picker update to ensure elements are in DOM
+    requestAnimationFrame(() => {
+      this._updateEntityPickers();
+    });
   }
 
   _renderSourceCard(source, index) {
@@ -720,7 +794,6 @@ class CustomEnergySourcesCardEditor extends HTMLElement {
           <ha-entity-picker
             class="source-entity"
             data-index="${index}"
-            .value="${source.entity || ''}"
             allow-custom-entity
           ></ha-entity-picker>
         </div>
@@ -736,7 +809,6 @@ class CustomEnergySourcesCardEditor extends HTMLElement {
             <ha-entity-picker
               class="source-rate-entity"
               data-index="${index}"
-              .value="${source.rate_entity || ''}"
               allow-custom-entity
             ></ha-entity-picker>
           </div>

@@ -1,10 +1,10 @@
 /**
  * Custom Energy Sources Card
  * A HACS-compatible custom Lovelace card for Home Assistant
- * Version 1.3.0
+ * Version 1.3.1
  */
 
-const CARD_VERSION = '1.3.0';
+const CARD_VERSION = '1.3.1';
 
 const DEFAULT_EMOJIS = {
   solar: '☀️',
@@ -147,35 +147,59 @@ class CustomEnergySourcesCard extends HTMLElement {
 
     if (!this._initialized && hass?.connection) {
       this._initialized = true;
-      this._subscribeToEnergyDate();
+      this._subscribeToEnergyCollection();
     }
 
     this._updateData();
   }
 
-  async _subscribeToEnergyDate() {
+  _getEnergyDataCollection() {
+    // Access Home Assistant's internal energy collection
+    // This is the same approach used by energy-flow-card-plus
+    if (this._hass?.connection?._energy) {
+      return this._hass.connection._energy;
+    }
+    return null;
+  }
+
+  async _subscribeToEnergyCollection() {
     if (!this._hass?.connection) return;
 
-    try {
-      this._unsubscribe = await this._hass.connection.subscribeMessage(
-        (msg) => {
-          console.debug('[Energy Card] Date selection message:', msg);
-          // Handle both possible message formats
-          this._dateRange = {
-            start: msg.start_date || msg.start,
-            end: msg.end_date || msg.end
-          };
-          console.debug('[Energy Card] Using date range:', this._dateRange);
+    const TIMEOUT_MS = 10000; // 10 second timeout
+    const POLL_INTERVAL_MS = 100;
+    const startTime = Date.now();
+
+    const pollForCollection = () => {
+      const collection = this._getEnergyDataCollection();
+
+      if (collection) {
+        console.debug('[Energy Card] Found energy collection, subscribing...');
+        this._energyCollectionUnsubscribe = collection.subscribe((data) => {
+          console.debug('[Energy Card] Energy collection data received:', data);
+          if (data.start && data.end) {
+            this._dateRange = {
+              start: data.start,
+              end: data.end
+            };
+            console.debug('[Energy Card] Using date range from collection:', this._dateRange);
+          }
           this._updateData();
-        },
-        { type: 'energy/subscribe_date_selection' }
-      );
-      console.debug('[Energy Card] Successfully subscribed to energy date selection');
-    } catch (e) {
-      console.warn('[Energy Card] Energy date subscription failed, using today:', e.message);
-      this._dateRange = this._getDateRangeForPeriod(this._getConfiguredPeriod());
-      this._updateData();
-    }
+        });
+        return;
+      }
+
+      if (Date.now() - startTime > TIMEOUT_MS) {
+        console.warn('[Energy Card] Timeout waiting for energy collection, using configured period');
+        this._dateRange = this._getDateRangeForPeriod(this._getConfiguredPeriod());
+        this._updateData();
+        return;
+      }
+
+      // Keep polling
+      setTimeout(pollForCollection, POLL_INTERVAL_MS);
+    };
+
+    pollForCollection();
   }
 
   _getDateRangeForPeriod(period) {
@@ -587,6 +611,10 @@ class CustomEnergySourcesCard extends HTMLElement {
     if (this._unsubscribe) {
       this._unsubscribe();
       this._unsubscribe = null;
+    }
+    if (this._energyCollectionUnsubscribe) {
+      this._energyCollectionUnsubscribe();
+      this._energyCollectionUnsubscribe = null;
     }
   }
 

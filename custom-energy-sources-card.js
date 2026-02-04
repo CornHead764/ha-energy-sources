@@ -1,10 +1,10 @@
 /**
  * Custom Energy Sources Card
  * A HACS-compatible custom Lovelace card for Home Assistant
- * Version 1.2.2
+ * Version 1.3.0
  */
 
-const CARD_VERSION = '1.2.2';
+const CARD_VERSION = '1.3.0';
 
 const DEFAULT_EMOJIS = {
   solar: '☀️',
@@ -52,6 +52,14 @@ const SOURCE_TYPES = [
   { value: 'gas', label: 'Gas' },
   { value: 'water', label: 'Water' },
   { value: 'default', label: 'Custom' }
+];
+
+const PERIOD_OPTIONS = [
+  { value: 'today', label: 'Today' },
+  { value: 'yesterday', label: 'Yesterday' },
+  { value: 'week', label: 'This Week' },
+  { value: 'month', label: 'This Month' },
+  { value: 'year', label: 'This Year' }
 ];
 
 // ============================================================================
@@ -107,6 +115,8 @@ class CustomEnergySourcesCard extends HTMLElement {
       currency: config.currency || '$',
       decimal_places: config.decimal_places ?? 2,
       cost_decimal_places: config.cost_decimal_places ?? 2,
+      period: config.period || 'today',
+      period_entity: config.period_entity || null,
       sources: config.sources.map(source => this._normalizeSource(source)),
       net_metering: config.net_metering || null
     };
@@ -163,24 +173,75 @@ class CustomEnergySourcesCard extends HTMLElement {
       console.debug('[Energy Card] Successfully subscribed to energy date selection');
     } catch (e) {
       console.warn('[Energy Card] Energy date subscription failed, using today:', e.message);
-      this._dateRange = this._getDefaultDateRange();
+      this._dateRange = this._getDateRangeForPeriod(this._getConfiguredPeriod());
       this._updateData();
     }
   }
 
-  _getDefaultDateRange() {
+  _getDateRangeForPeriod(period) {
     const now = new Date();
-    const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    let start, end;
+
+    switch (period) {
+      case 'yesterday':
+        start = new Date(today);
+        start.setDate(start.getDate() - 1);
+        end = new Date(today);
+        break;
+      case 'week':
+        start = new Date(today);
+        start.setDate(start.getDate() - start.getDay()); // Start of week (Sunday)
+        end = now;
+        break;
+      case 'month':
+        start = new Date(today.getFullYear(), today.getMonth(), 1);
+        end = now;
+        break;
+      case 'year':
+        start = new Date(today.getFullYear(), 0, 1);
+        end = now;
+        break;
+      case 'today':
+      default:
+        start = today;
+        end = now;
+        break;
+    }
+
     return {
-      start: startOfDay.toISOString(),
-      end: now.toISOString()
+      start: start.toISOString(),
+      end: end.toISOString()
     };
+  }
+
+  _getConfiguredPeriod() {
+    // Check if period_entity is set and has a valid value
+    if (this._config?.period_entity && this._hass?.states?.[this._config.period_entity]) {
+      const entityState = this._hass.states[this._config.period_entity].state;
+      // Map common values to our period options
+      const stateMap = {
+        'today': 'today',
+        'yesterday': 'yesterday',
+        'week': 'week',
+        'this_week': 'week',
+        'month': 'month',
+        'this_month': 'month',
+        'year': 'year',
+        'this_year': 'year'
+      };
+      if (stateMap[entityState.toLowerCase()]) {
+        return stateMap[entityState.toLowerCase()];
+      }
+    }
+    return this._config?.period || 'today';
   }
 
   async _updateData() {
     if (!this._hass || !this._config) return;
 
-    const dateRange = this._dateRange || this._getDefaultDateRange();
+    // Use energy dashboard date range if available, otherwise use configured period
+    const dateRange = this._dateRange || this._getDateRangeForPeriod(this._getConfiguredPeriod());
     const startTime = new Date(dateRange.start);
     const endTime = dateRange.end ? new Date(dateRange.end) : new Date();
 
@@ -561,6 +622,7 @@ class CustomEnergySourcesCardEditor extends HTMLElement {
       show_total: config.show_total !== false,
       currency: config.currency || '$',
       decimal_places: config.decimal_places ?? 2,
+      period: config.period || 'today',
       sources: config.sources || []
     };
     this.render();
@@ -732,6 +794,12 @@ class CustomEnergySourcesCardEditor extends HTMLElement {
               <label>Decimal Places</label>
               <input type="number" id="decimal_places" value="${this._config.decimal_places ?? 2}" min="0" max="4" style="width: 60px;">
             </div>
+            <div class="field">
+              <label>Time Period</label>
+              <select id="period">
+                ${PERIOD_OPTIONS.map(p => `<option value="${p.value}" ${this._config.period === p.value ? 'selected' : ''}>${p.label}</option>`).join('')}
+              </select>
+            </div>
           </div>
           <div class="switch-row">
             <label>Show Header</label>
@@ -854,6 +922,11 @@ class CustomEnergySourcesCardEditor extends HTMLElement {
 
     this.shadowRoot.getElementById('decimal_places').addEventListener('input', (e) => {
       this._config.decimal_places = parseInt(e.target.value) || 2;
+      this._fireConfigChanged();
+    });
+
+    this.shadowRoot.getElementById('period').addEventListener('change', (e) => {
+      this._config.period = e.target.value;
       this._fireConfigChanged();
     });
 

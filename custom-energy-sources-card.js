@@ -1,10 +1,10 @@
 /**
  * Custom Energy Sources Card
  * A HACS-compatible custom Lovelace card for Home Assistant
- * Version 1.4.0
+ * Version 1.5.0
  */
 
-const CARD_VERSION = '1.4.0';
+const CARD_VERSION = '1.5.0';
 
 const DEFAULT_EMOJIS = {
   solar: '☀️',
@@ -475,7 +475,9 @@ class CustomEnergySourcesCard extends HTMLElement {
 
     // Track costs by category for separate totals
     const costByCategory = {
-      electricity: 0,  // solar, battery, grid
+      solar: 0,       // Solar production value (not a real cost, but value generated)
+      grid_import: 0, // Cost of power bought from grid
+      grid_export: 0, // Credit for power sold to grid (will be negative)
       gas: 0,
       water: 0
     };
@@ -487,15 +489,19 @@ class CustomEnergySourcesCard extends HTMLElement {
 
       const cost = this._calculateCost(source, value);
       if (cost !== null && !isNaN(cost)) {
-        // Categorize the cost
-        if (source.type === 'gas') {
+        // Categorize the cost properly
+        if (source.type === 'solar') {
+          costByCategory.solar += cost;
+        } else if (source.type === 'grid_import') {
+          costByCategory.grid_import += cost;
+        } else if (source.type === 'grid_export') {
+          costByCategory.grid_export += cost;
+        } else if (source.type === 'gas') {
           costByCategory.gas += cost;
         } else if (source.type === 'water') {
           costByCategory.water += cost;
-        } else {
-          // solar, battery_in, battery_out, grid_import, grid_export, grid_net, default
-          costByCategory.electricity += cost;
         }
+        // battery_in, battery_out, grid_net, default - don't add to totals
         hasAnyCost = true;
       }
 
@@ -538,7 +544,12 @@ class CustomEnergySourcesCard extends HTMLElement {
       }
 
       const cost = netValue * rate;
-      costByCategory.electricity += cost;
+      // Net metering affects grid import/export balance
+      if (netValue > 0) {
+        costByCategory.grid_import += cost;
+      } else {
+        costByCategory.grid_export += cost;
+      }
       hasAnyCost = true;
 
       netMeteringRow = {
@@ -639,16 +650,31 @@ class CustomEnergySourcesCard extends HTMLElement {
                 </div>
               </div>
             ` : ''}
-            ${this._config.show_total && hasAnyCost ? `
-              ${costByCategory.electricity !== 0 ? `
+            ${this._config.show_total && hasAnyCost ? (() => {
+              // Calculate grid net (import cost + export credit, where export is negative)
+              const gridNet = costByCategory.grid_import + costByCategory.grid_export;
+              return `
+              ${costByCategory.solar !== 0 ? `
+              <div class="energy-row total">
+                <div class="source-info">
+                  <span class="emoji">☀️</span>
+                  <span class="label">Solar Value</span>
+                </div>
+                <div class="values">
+                  <span class="value ${costByCategory.solar < 0 ? 'credit' : ''}">${this._formatCost(Math.abs(costByCategory.solar), this._config.cost_decimal_places)}</span>
+                  <span class="cost credit">Generated</span>
+                </div>
+              </div>
+              ` : ''}
+              ${(costByCategory.grid_import !== 0 || costByCategory.grid_export !== 0) ? `
               <div class="energy-row total">
                 <div class="source-info">
                   <span class="emoji">⚡</span>
-                  <span class="label">Electricity Total</span>
+                  <span class="label">Grid Net</span>
                 </div>
                 <div class="values">
-                  <span class="value ${costByCategory.electricity < 0 ? 'credit' : ''}">${this._formatCost(costByCategory.electricity, this._config.cost_decimal_places)}</span>
-                  ${costByCategory.electricity < 0 ? '<span class="cost credit">Credit</span>' : ''}
+                  <span class="value ${gridNet < 0 ? 'credit' : ''}">${this._formatCost(gridNet, this._config.cost_decimal_places)}</span>
+                  ${gridNet < 0 ? '<span class="cost credit">Credit</span>' : '<span class="cost">Bill</span>'}
                 </div>
               </div>
               ` : ''}
@@ -674,7 +700,8 @@ class CustomEnergySourcesCard extends HTMLElement {
                 </div>
               </div>
               ` : ''}
-            ` : ''}
+            `;
+            })() : ''}
           `}
         </div>
       </ha-card>

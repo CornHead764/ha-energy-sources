@@ -1,10 +1,10 @@
 /**
  * Custom Energy Sources Card
  * A HACS-compatible custom Lovelace card for Home Assistant
- * Version 1.2.1
+ * Version 1.2.2
  */
 
-const CARD_VERSION = '1.2.1';
+const CARD_VERSION = '1.2.2';
 
 const DEFAULT_EMOJIS = {
   solar: '☀️',
@@ -149,16 +149,20 @@ class CustomEnergySourcesCard extends HTMLElement {
     try {
       this._unsubscribe = await this._hass.connection.subscribeMessage(
         (msg) => {
+          console.debug('[Energy Card] Date selection message:', msg);
+          // Handle both possible message formats
           this._dateRange = {
-            start: msg.start,
-            end: msg.end
+            start: msg.start_date || msg.start,
+            end: msg.end_date || msg.end
           };
+          console.debug('[Energy Card] Using date range:', this._dateRange);
           this._updateData();
         },
         { type: 'energy/subscribe_date_selection' }
       );
+      console.debug('[Energy Card] Successfully subscribed to energy date selection');
     } catch (e) {
-      console.warn('Energy date subscription failed, using today:', e.message);
+      console.warn('[Energy Card] Energy date subscription failed, using today:', e.message);
       this._dateRange = this._getDefaultDateRange();
       this._updateData();
     }
@@ -551,6 +555,7 @@ class CustomEnergySourcesCardEditor extends HTMLElement {
 
   setConfig(config) {
     this._config = {
+      type: config.type,  // Preserve the card type for config-changed events
       title: config.title || 'Energy Sources',
       show_header: config.show_header !== false,
       show_total: config.show_total !== false,

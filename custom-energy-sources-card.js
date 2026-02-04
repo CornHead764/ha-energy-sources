@@ -4,7 +4,7 @@
  * Version 1.5.0
  */
 
-const CARD_VERSION = '1.5.0';
+const CARD_VERSION = '1.5.1';
 
 const DEFAULT_EMOJIS = {
   solar: '☀️',
@@ -754,7 +754,11 @@ class CustomEnergySourcesCardEditor extends HTMLElement {
       period: config.period || 'today',
       sources: config.sources || []
     };
-    this.render();
+    // Only render on initial load, not on every config change
+    // This prevents the editor from stealing focus during typing
+    if (!this._rendered) {
+      this.render();
+    }
   }
 
   _fireConfigChanged() {

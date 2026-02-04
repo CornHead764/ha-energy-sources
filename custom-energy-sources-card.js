@@ -1,10 +1,10 @@
 /**
  * Custom Energy Sources Card
  * A HACS-compatible custom Lovelace card for Home Assistant
- * Version 1.3.1
+ * Version 1.4.0
  */
 
-const CARD_VERSION = '1.3.1';
+const CARD_VERSION = '1.4.0';
 
 const DEFAULT_EMOJIS = {
   solar: '☀️',
@@ -304,14 +304,23 @@ class CustomEnergySourcesCard extends HTMLElement {
   async _fetchStatistics(entityIds, startTime, endTime) {
     if (!this._hass?.callWS) return {};
 
+    // Calculate appropriate period based on time span (like energy-flow-card-plus)
+    const diffHours = (endTime - startTime) / (1000 * 60 * 60);
+    let period = 'hour';
+    if (diffHours > 35 * 24) {
+      period = 'month';
+    } else if (diffHours > 48) {
+      period = 'day';
+    }
+
     try {
+      console.debug(`[Energy Card] Fetching statistics from ${startTime.toISOString()} to ${endTime.toISOString()} with period: ${period}`);
       return await this._hass.callWS({
         type: 'recorder/statistics_during_period',
         start_time: startTime.toISOString(),
         end_time: endTime.toISOString(),
         statistic_ids: entityIds,
-        period: 'hour',
-        types: ['sum', 'change']
+        period: period,
       });
     } catch (e) {
       console.error('Statistics fetch failed:', e);
@@ -328,17 +337,44 @@ class CustomEnergySourcesCard extends HTMLElement {
         continue;
       }
 
-      let totalValue = 0;
+      // Use the same calculation as energy-flow-card-plus
       const firstStat = stats[0];
       const lastStat = stats[stats.length - 1];
 
-      if (typeof firstStat.sum === 'number' && typeof lastStat.sum === 'number') {
-        totalValue = lastStat.sum - firstStat.sum;
-      } else if (typeof firstStat.change === 'number') {
-        totalValue = stats.reduce((acc, stat) => acc + (stat.change || 0), 0);
+      let totalValue = null;
+
+      // Need at least 2 data points for a proper diff
+      if (stats.length >= 2) {
+        const endSum = lastStat.sum;
+        const startSum = firstStat.sum;
+
+        if (endSum !== null && endSum !== undefined) {
+          if (startSum !== null && startSum !== undefined) {
+            totalValue = endSum - startSum;
+          } else {
+            // If no start sum, just use end sum
+            totalValue = endSum;
+          }
+        }
+      } else if (stats.length === 1) {
+        // Single data point - check for change value
+        if (firstStat.change !== null && firstStat.change !== undefined) {
+          totalValue = firstStat.change;
+        } else if (firstStat.sum !== null && firstStat.sum !== undefined) {
+          totalValue = firstStat.sum;
+        }
       }
 
-      data[entityId] = { value: totalValue };
+      // Fall back to summing change values if sum approach didn't work
+      if (totalValue === null) {
+        totalValue = stats.reduce((acc, stat) => {
+          const change = stat.change;
+          return acc + (typeof change === 'number' ? change : 0);
+        }, 0);
+      }
+
+      console.debug(`[Energy Card] ${entityId}: ${stats.length} data points, value: ${totalValue}`);
+      data[entityId] = { value: totalValue || 0 };
     }
 
     return data;
@@ -436,7 +472,13 @@ class CustomEnergySourcesCard extends HTMLElement {
     }
 
     const sources = this._config.sources || [];
-    let totalCost = 0;
+
+    // Track costs by category for separate totals
+    const costByCategory = {
+      electricity: 0,  // solar, battery, grid
+      gas: 0,
+      water: 0
+    };
     let hasAnyCost = false;
 
     const rows = sources.map(source => {
@@ -445,7 +487,15 @@ class CustomEnergySourcesCard extends HTMLElement {
 
       const cost = this._calculateCost(source, value);
       if (cost !== null && !isNaN(cost)) {
-        totalCost += cost;
+        // Categorize the cost
+        if (source.type === 'gas') {
+          costByCategory.gas += cost;
+        } else if (source.type === 'water') {
+          costByCategory.water += cost;
+        } else {
+          // solar, battery_in, battery_out, grid_import, grid_export, grid_net, default
+          costByCategory.electricity += cost;
+        }
         hasAnyCost = true;
       }
 
@@ -488,7 +538,7 @@ class CustomEnergySourcesCard extends HTMLElement {
       }
 
       const cost = netValue * rate;
-      totalCost += cost;
+      costByCategory.electricity += cost;
       hasAnyCost = true;
 
       netMeteringRow = {
@@ -590,16 +640,40 @@ class CustomEnergySourcesCard extends HTMLElement {
               </div>
             ` : ''}
             ${this._config.show_total && hasAnyCost ? `
+              ${costByCategory.electricity !== 0 ? `
               <div class="energy-row total">
                 <div class="source-info">
-                  <span class="emoji">💵</span>
-                  <span class="label">Total Cost</span>
+                  <span class="emoji">⚡</span>
+                  <span class="label">Electricity Total</span>
                 </div>
                 <div class="values">
-                  <span class="value ${totalCost < 0 ? 'credit' : ''}">${this._formatCost(totalCost, this._config.cost_decimal_places)}</span>
-                  ${totalCost < 0 ? '<span class="cost credit">Credit</span>' : ''}
+                  <span class="value ${costByCategory.electricity < 0 ? 'credit' : ''}">${this._formatCost(costByCategory.electricity, this._config.cost_decimal_places)}</span>
+                  ${costByCategory.electricity < 0 ? '<span class="cost credit">Credit</span>' : ''}
                 </div>
               </div>
+              ` : ''}
+              ${costByCategory.gas !== 0 ? `
+              <div class="energy-row total">
+                <div class="source-info">
+                  <span class="emoji">🔥</span>
+                  <span class="label">Gas Total</span>
+                </div>
+                <div class="values">
+                  <span class="value">${this._formatCost(costByCategory.gas, this._config.cost_decimal_places)}</span>
+                </div>
+              </div>
+              ` : ''}
+              ${costByCategory.water !== 0 ? `
+              <div class="energy-row total">
+                <div class="source-info">
+                  <span class="emoji">💧</span>
+                  <span class="label">Water Total</span>
+                </div>
+                <div class="values">
+                  <span class="value">${this._formatCost(costByCategory.water, this._config.cost_decimal_places)}</span>
+                </div>
+              </div>
+              ` : ''}
             ` : ''}
           `}
         </div>
@@ -682,21 +756,49 @@ class CustomEnergySourcesCardEditor extends HTMLElement {
     const sources = this._config.sources || [];
 
     // Update all entity pickers with hass and their values
-    this.shadowRoot.querySelectorAll('.source-entity').forEach(picker => {
-      picker.hass = this._hass;
-      const index = parseInt(picker.dataset.index);
-      if (sources[index]) {
-        picker.value = sources[index].entity || '';
-      }
-    });
+    // Use setTimeout to ensure custom elements are fully initialized
+    const updatePickers = () => {
+      this.shadowRoot.querySelectorAll('.source-entity').forEach(picker => {
+        if (picker.updateComplete) {
+          // LitElement - wait for it
+          picker.updateComplete.then(() => {
+            picker.hass = this._hass;
+            const index = parseInt(picker.dataset.index);
+            if (sources[index]) {
+              picker.value = sources[index].entity || '';
+            }
+          });
+        } else {
+          picker.hass = this._hass;
+          const index = parseInt(picker.dataset.index);
+          if (sources[index]) {
+            picker.value = sources[index].entity || '';
+          }
+        }
+      });
 
-    this.shadowRoot.querySelectorAll('.source-rate-entity').forEach(picker => {
-      picker.hass = this._hass;
-      const index = parseInt(picker.dataset.index);
-      if (sources[index]) {
-        picker.value = sources[index].rate_entity || '';
-      }
-    });
+      this.shadowRoot.querySelectorAll('.source-rate-entity').forEach(picker => {
+        if (picker.updateComplete) {
+          picker.updateComplete.then(() => {
+            picker.hass = this._hass;
+            const index = parseInt(picker.dataset.index);
+            if (sources[index]) {
+              picker.value = sources[index].rate_entity || '';
+            }
+          });
+        } else {
+          picker.hass = this._hass;
+          const index = parseInt(picker.dataset.index);
+          if (sources[index]) {
+            picker.value = sources[index].rate_entity || '';
+          }
+        }
+      });
+    };
+
+    // Try immediately and also after a short delay
+    updatePickers();
+    setTimeout(updatePickers, 100);
   }
 
   render() {
